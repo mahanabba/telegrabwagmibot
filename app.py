@@ -153,7 +153,7 @@ async def generate_leaderboard_message(chat_id: int, context: ContextTypes.DEFAU
         message_lines.append("No invite data available yet.")
     else:
         for rank, (inviter, count) in enumerate(sorted_board, start=1):
-            message_lines.append(f"{rank}. Inviter {inviter}: {count} valid invites")
+            message_lines.append(f"{rank}. Inviter {display_name}: {count} valid invites")
     return "\n".join(message_lines)
 
 # --- Daily job to send the leaderboard automatically ---
