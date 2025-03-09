@@ -112,6 +112,7 @@ async def my_invites(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def generate_leaderboard_message(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
     now = datetime.datetime.now()
     leaderboard = {}
+    # Build leaderboard using the inviter's ID (stored as string)
     for inviter, events in invite_stats.items():
         valid_count = 0
         for event in events:
@@ -123,6 +124,28 @@ async def generate_leaderboard_message(chat_id: int, context: ContextTypes.DEFAU
                 except Exception as e:
                     logging.error(f"Error checking user {event['user_id']}: {e}")
         leaderboard[inviter] = valid_count
+
+    sorted_board = sorted(leaderboard.items(), key=lambda x: x[1], reverse=True)
+    message_lines = ["Leaderboard of valid invites:"]
+    
+    if not sorted_board:
+        message_lines.append("No invite data available yet.")
+    else:
+        for rank, (inviter, count) in enumerate(sorted_board, start=1):
+            try:
+                # Fetch the inviter's user info from the chat.
+                # Assuming the inviter's ID is stored as a string convertible to int.
+                inviter_member = await context.bot.get_chat_member(chat_id, int(inviter))
+                # Use username if available, else fallback to full name.
+                if inviter_member.user.username:
+                    display_name = f"@{inviter_member.user.username}"
+                else:
+                    display_name = inviter_member.user.full_name
+            except Exception as e:
+                logging.error(f"Error fetching inviter info for {inviter}: {e}")
+                display_name = inviter  # fallback to inviter ID if error occurs
+            message_lines.append(f"{rank}. Inviter {display_name}: {count} valid invites")
+    return "\n".join(message_lines)
 
     sorted_board = sorted(leaderboard.items(), key=lambda x: x[1], reverse=True)
     message_lines = ["Leaderboard of valid invites:"]
