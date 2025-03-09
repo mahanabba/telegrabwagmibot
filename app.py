@@ -1,6 +1,6 @@
 import datetime
 import logging
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -10,74 +10,76 @@ from telegram.ext import (
 )
 
 # In-memory storage for invite events.
-# Structure: { inviter_id (str): [ { 'user_id': int, 'join_date': datetime }, ... ] }
+# We'll use the inviter's display name as key: { inviter_display_name (str): [ { 'user_id': int, 'join_date': datetime }, ... ] }
 invite_stats = {}
-# Mapping from persistent invite link (str) to inviter's ID (str)
+# Mapping from persistent invite link (str) to inviter's display name (str)
 link_to_inviter = {}
 
-# --- Handler for Join Requests (Private Groups) ---
+# --- Handler for Join Requests (e.g., in private groups) ---
 async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     join_request = update.chat_join_request
     user_id = join_request.from_user.id
     used_invite_obj = join_request.invite_link  # ChatInviteLink object, if available
     if used_invite_obj:
         invite_url = used_invite_obj.invite_link
-        inviter_id = link_to_inviter.get(invite_url)
-        if inviter_id:
+        inviter_display = link_to_inviter.get(invite_url)
+        if inviter_display:
             join_date = datetime.datetime.now()
-            invite_stats.setdefault(inviter_id, []).append({
+            invite_stats.setdefault(inviter_display, []).append({
                 'user_id': user_id,
                 'join_date': join_date
             })
-            logging.info(f"[Join Request] User {user_id} used invite from inviter {inviter_id} at {join_date}")
+            logging.info(f"User {user_id} used invite from {inviter_display} at {join_date}")
         else:
-            logging.info(f"[Join Request] Invite link {invite_url} not found in mapping.")
+            logging.info(f"Invite link {invite_url} not found in mapping.")
     try:
-        # Approve the join request so the user is added to the chat.
+        # Approve join request so user is added
         await context.bot.approve_chat_join_request(
             chat_id=join_request.chat.id,
             user_id=user_id
         )
-        logging.info(f"[Join Request] Approved join request for user {user_id}")
+        logging.info(f"Approved join request for user {user_id}")
     except Exception as e:
-        logging.error(f"[Join Request] Error approving join request for user {user_id}: {e}")
+        logging.error(f"Error approving join request for user {user_id}: {e}")
 
-# --- Handler for Direct Join Events (Public Groups) ---
+# --- Handler for Direct Join Events (e.g., in public groups) ---
 async def join_event_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_member = update.chat_member
-    # Check if a user has just joined
-    if chat_member.new_chat_member.status == 'member':
-        used_invite_obj = chat_member.invite_link  # May be None if not joined via a link
+    if (chat_member.new_chat_member.status == 'member' and 
+        chat_member.old_chat_member.status in ['left', 'kicked']):
+        used_invite_obj = chat_member.invite_link  # May be None if no link used
         if used_invite_obj:
             invite_url = used_invite_obj.invite_link
-            inviter_id = link_to_inviter.get(invite_url)
-            if inviter_id:
+            inviter_display = link_to_inviter.get(invite_url)
+            if inviter_display:
                 join_date = datetime.datetime.now()
-                invite_stats.setdefault(inviter_id, []).append({
+                invite_stats.setdefault(inviter_display, []).append({
                     'user_id': chat_member.new_chat_member.user.id,
                     'join_date': join_date
                 })
-                logging.info(f"[Join Event] User {chat_member.new_chat_member.user.id} joined via invite from inviter {inviter_id} at {join_date}")
+                logging.info(f"User {chat_member.new_chat_member.user.id} joined via invite from {inviter_display} at {join_date}")
         else:
-            logging.info("[Join Event] User joined but no invite_link found.")
+            logging.info("User joined without using an invite link.")
 
 # --- Command to generate and share a persistent invite link ---
 async def get_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    inviter_id = str(update.effective_user.id)
+    user = update.effective_user
+    # Build display name: use username if available, else full name.
+    if user.username:
+        display_name = f"@{user.username}"
+    else:
+        display_name = user.full_name
+
     try:
-        # Create a new invite link with join requests enabled.
-        invite_link_obj = await context.bot.create_chat_invite_link(
-            chat_id=chat_id,
-            creates_join_request=True  # This flag makes new joiners send a join request.
-        )
-        invite_link = invite_link_obj.invite_link
-        # Map this link to the inviter's ID for tracking later.
-        link_to_inviter[invite_link] = inviter_id
+        # Use export_chat_invite_link to get a persistent primary invite link.
+        invite_link = await context.bot.export_chat_invite_link(chat_id=chat_id)
+        # Map the invite link to the inviter's display name.
+        link_to_inviter[invite_link] = display_name
         await update.message.reply_text(f"Here is your invite link: {invite_link}")
     except Exception as e:
-        logging.error(f"Error creating invite link: {e}")
-        await update.message.reply_text(f"Failed to create invite link: {e}")
+        logging.error(f"Error exporting invite link: {e}")
+        await update.message.reply_text(f"Failed to export invite link: {e}")
 
 # --- Command to display the leaderboard ---
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -87,14 +89,20 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # --- Command to show personal invite stats ---
 async def my_invites(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id_str = str(update.effective_user.id)
+    user = update.effective_user
+    # Use the display name we stored when generating the link.
+    if user.username:
+        key = f"@{user.username}"
+    else:
+        key = user.full_name
+
     now = datetime.datetime.now()
-    events = invite_stats.get(user_id_str, [])
+    events = invite_stats.get(key, [])
     if not events:
         await update.message.reply_text("You haven't invited anyone yet.")
         return
 
-    message_lines = [f"Invite stats for you ({update.effective_user.first_name}):"]
+    message_lines = [f"Invite stats for you ({key}):"]
     valid_count = 0
     for event in events:
         days_in = (now - event['join_date']).days
@@ -112,8 +120,7 @@ async def my_invites(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def generate_leaderboard_message(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
     now = datetime.datetime.now()
     leaderboard = {}
-    # Build leaderboard using the inviter's ID (stored as string)
-    for inviter, events in invite_stats.items():
+    for inviter_display, events in invite_stats.items():
         valid_count = 0
         for event in events:
             if (now - event['join_date']).days >= 0:
@@ -123,37 +130,34 @@ async def generate_leaderboard_message(chat_id: int, context: ContextTypes.DEFAU
                         valid_count += 1
                 except Exception as e:
                     logging.error(f"Error checking user {event['user_id']}: {e}")
-        leaderboard[inviter] = valid_count
+        leaderboard[inviter_display] = valid_count
 
     sorted_board = sorted(leaderboard.items(), key=lambda x: x[1], reverse=True)
     message_lines = ["Leaderboard of valid invites:"]
-    
-    if not sorted_board:
-        message_lines.append("No invite data available yet.")
-    else:
-        for rank, (inviter, count) in enumerate(sorted_board, start=1):
-            try:
-                # Fetch the inviter's user info from the chat.
-                # Assuming the inviter's ID is stored as a string convertible to int.
-                inviter_member = await context.bot.get_chat_member(chat_id, int(inviter))
-                # Use username if available, else fallback to full name.
-                if inviter_member.user.username:
-                    display_name = f"@{inviter_member.user.username}"
-                else:
-                    display_name = inviter_member.user.full_name
-            except Exception as e:
-                logging.error(f"Error fetching inviter info for {inviter}: {e}")
-                display_name = inviter  # fallback to inviter ID if error occurs
-            message_lines.append(f"{rank}. Inviter {display_name}: {count} valid invites")
-    return "\n".join(message_lines)
+    rank = 1
+    for user_id, count in invite_stats.items():
+        try:
+            # Fetch the user info from Telegram
+            chat = await context.bot.get_chat(user_id)
+            # Use the username if available, otherwise use first_name
+            if chat.username:
+                inviter_name = f"@{chat.username}"
+            else:
+                inviter_name = chat.first_name
+        except Exception as e:
+            # If there's an error, fall back to the user ID
+            inviter_name = str(user_id)
+        
+        message_lines.append(f"{rank}. Inviter {inviter_name}: {count} valid invites")
+        rank += 1
 
-    sorted_board = sorted(leaderboard.items(), key=lambda x: x[1], reverse=True)
-    message_lines = ["Leaderboard of valid invites:"]
+    leaderboard_text = "\n".join(leaderboard_lines)
+    await Update.message.reply_text(leaderboard_text)
     if not sorted_board:
         message_lines.append("No invite data available yet.")
     else:
-        for rank, (inviter, count) in enumerate(sorted_board, start=1):
-            message_lines.append(f"{rank}. Inviter {display_name}: {count} valid invites")
+        for rank, (inviter_display, count) in enumerate(sorted_board, start=1):
+            message_lines.append(f"{rank}. Inviter {inviter_display}: {count} valid invites")
     return "\n".join(message_lines)
 
 # --- Daily job to send the leaderboard automatically ---
@@ -176,15 +180,13 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Add handler for join requests (private groups)
+    # Add handler for join requests.
     app.add_handler(ChatJoinRequestHandler(join_request_handler))
-    # Add handler for direct join events (public groups)
+    # Add handler for direct join events.
     app.add_handler(ChatMemberHandler(join_event_handler, ChatMemberHandler.CHAT_MEMBER))
-    # Command to generate invite link
+    # Command handlers.
     app.add_handler(CommandHandler("getinvite", get_invite_link))
-    # Command to display leaderboard
     app.add_handler(CommandHandler("leaderboard", leaderboard_command))
-    # Command to display personal invite stats
     app.add_handler(CommandHandler("myinvites", my_invites))
     # Schedule daily leaderboard posting.
     app.job_queue.run_daily(
