@@ -134,30 +134,13 @@ async def generate_leaderboard_message(chat_id: int, context: ContextTypes.DEFAU
 
     sorted_board = sorted(leaderboard.items(), key=lambda x: x[1], reverse=True)
     message_lines = ["Leaderboard of valid invites:"]
-    rank = 1
-    for user_id, count in invite_stats.items():
-        try:
-            # Fetch the user info from Telegram
-            chat = await context.bot.get_chat(user_id)
-            # Use the username if available, otherwise use first_name
-            if chat.username:
-                inviter_name = f"@{chat.username}"
-            else:
-                inviter_name = chat.first_name
-        except Exception as e:
-            # If there's an error, fall back to the user ID
-            inviter_name = str(user_id)
-        
-        message_lines.append(f"{rank}. Inviter {inviter_name}: {count} valid invites")
-        rank += 1
-
-    leaderboard_text = "\n".join(message_lines)
-    await Update.message.reply_text(leaderboard_text)
     if not sorted_board:
         message_lines.append("No invite data available yet.")
     else:
         for rank, (inviter_display, count) in enumerate(sorted_board, start=1):
             message_lines.append(f"{rank}. Inviter {inviter_display}: {count} valid invites")
+    # Remove the erroneous call to reply_text:
+    # await Update.message.reply_text("\n".join(message_lines))
     return "\n".join(message_lines)
 
 # --- Daily job to send the leaderboard automatically ---
