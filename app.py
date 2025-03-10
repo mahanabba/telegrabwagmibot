@@ -1,6 +1,6 @@
 import datetime
 import logging
-from telegram import Update
+from telegram import Update, Bot, ChatMember
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -14,73 +14,88 @@ from telegram.ext import (
 invite_stats = {}
 # Mapping from persistent invite link (str) to inviter's display name (str)
 link_to_inviter = {}
+global BOT_TOKEN, GROUP_CHAT_ID
+BOT_TOKEN = "7672094667:AAE0KZYq0QY3z5hCa_iaIr94vaRbJSAyjnU"        # Replace with your actual bot token.
+GROUP_CHAT_ID = "-1002455294618"   # e.g., -1001234567890
 
 # --- Handler for Join Requests (e.g., in private groups) ---
-async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    join_request = update.chat_join_request
-    user_id = join_request.from_user.id
-    used_invite_obj = join_request.invite_link  # ChatInviteLink object, if available
-    if used_invite_obj:
-        invite_url = used_invite_obj.invite_link
-        inviter_display = link_to_inviter.get(invite_url)
-        if inviter_display:
-            join_date = datetime.datetime.now()
-            invite_stats.setdefault(inviter_display, []).append({
-                'user_id': user_id,
-                'join_date': join_date
-            })
-            logging.info(f"User {user_id} used invite from {inviter_display} at {join_date}")
-        else:
-            logging.info(f"Invite link {invite_url} not found in mapping.")
+
+async def get_invite_link_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    inviter_id = str(update.effective_user.id)
     try:
-        # Approve join request so user is added
-        await context.bot.approve_chat_join_request(
-            chat_id=join_request.chat.id,
-            user_id=user_id
+        # Set expiration for 7 days from now (Unix timestamp)
+        expire_date = int((datetime.datetime.now() + datetime.timedelta(days=7)).timestamp())
+        
+        # Create an invite link with join requests enabled that expires in 7 days.
+        invite_link_obj = await context.bot.create_chat_invite_link(
+            chat_id=chat_id,
+            creates_join_request=True,
+            expire_date=expire_date
         )
-        logging.info(f"Approved join request for user {user_id}")
+        invite_link = invite_link_obj.invite_link
+        
+        # Map this link to the inviter's ID for tracking later.
+        link_to_inviter[invite_link] = inviter_id
+        
+        await update.message.reply_text(f"Private invite link (with join requests, valid for 7 days):\n{invite_link}")
     except Exception as e:
-        logging.error(f"Error approving join request for user {user_id}: {e}")
+        logging.error(f"Error creating invite link: {e}")
+        await update.message.reply_text(f"Failed to create invite link: {e}")
 
-# --- Handler for Direct Join Events (e.g., in public groups) ---
-async def join_event_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_member = update.chat_member
-    if (chat_member.new_chat_member.status == 'member' and 
-        chat_member.old_chat_member.status in ['left', 'kicked']):
-        used_invite_obj = chat_member.invite_link  # May be None if no link used
-        if used_invite_obj:
-            invite_url = used_invite_obj.invite_link
-            inviter_display = link_to_inviter.get(invite_url)
-            if inviter_display:
-                join_date = datetime.datetime.now()
-                invite_stats.setdefault(inviter_display, []).append({
-                    'user_id': chat_member.new_chat_member.user.id,
-                    'join_date': join_date
-                })
-                logging.info(f"User {chat_member.new_chat_member.user.id} joined via invite from {inviter_display} at {join_date}")
-        else:
-            logging.info("User joined without using an invite link.")
-
-# --- Command to generate and share a persistent invite link ---
 async def get_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    user = update.effective_user
-    # Build display name: use username if available, else full name.
-    if user.username:
-        display_name = f"@{user.username}"
-    else:
-        display_name = user.full_name
-
+    inviter_id = str(update.effective_user.id)
     try:
-        # Use export_chat_invite_link to get a persistent primary invite link.
-        invite_link = await context.bot.export_chat_invite_link(chat_id=chat_id)
-        # Map the invite link to the inviter's display name.
-        link_to_inviter[invite_link] = display_name
-        await update.message.reply_text(f"Here is your invite link: {invite_link}")
+        # Create a permanent invite link with join requests enabled.
+        invite_link_obj = await context.bot.create_chat_invite_link(
+            chat_id=chat_id,
+            creates_join_request=True
+            # No expire_date provided; link remains permanent.
+        )
+        invite_link = invite_link_obj.invite_link
+        
+        # Map this link to the inviter's ID for tracking later.
+        link_to_inviter[invite_link] = inviter_id
+        
+        await update.message.reply_text(f"Public invite link (with join requests):\n{invite_link}")
     except Exception as e:
-        logging.error(f"Error exporting invite link: {e}")
-        await update.message.reply_text(f"Failed to export invite link: {e}")
+        logging.error(f"Error creating invite link: {e}")
+        await update.message.reply_text(f"Failed to create invite link: {e}")
 
+
+async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Approves join requests & correctly tracks who invited the user."""
+    request = update.chat_join_request
+    user = request.from_user
+    invite_link = request.invite_link
+
+    # Approve the request
+    await context.bot.approve_chat_join_request(request.chat.id, user.id)
+    await context.bot.send_message(request.chat.id, f"✅ {user.first_name} has joined!")
+
+    # Retrieve the inviter’s name
+    inviter_display = link_to_inviter.get(invite_link, "Unknown")
+
+    # Store invite tracking
+    if inviter_display not in invite_stats:
+        invite_stats[inviter_display] = []
+
+    invite_stats[inviter_display].append({
+        'user_id': user.id,
+        'join_date': datetime.datetime.now()
+    })
+
+async def join_event_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles new users joining and users leaving."""
+    chat_member = update.chat_member
+    user = chat_member.new_chat_member.user
+
+    if chat_member.new_chat_member.status == ChatMember.MEMBER:
+        await context.bot.send_message(chat_member.chat.id, f"👋 Welcome {user.first_name}!")
+
+    elif chat_member.new_chat_member.status in [ChatMember.LEFT, ChatMember.KICKED]:
+        await context.bot.send_message(chat_member.chat.id, f"❌ {user.first_name} has left.")
 # --- Command to display the leaderboard ---
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
@@ -116,6 +131,41 @@ async def my_invites(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     message_lines.append(f"Total valid invites: {valid_count}")
     await update.message.reply_text("\n".join(message_lines))
 
+
+async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Approves join requests & tracks who invited the user."""
+    request = update.chat_join_request
+    user = request.from_user
+
+    # Approve the join request
+    await context.bot.approve_chat_join_request(request.chat.id, user.id)
+    await context.bot.send_message(request.chat.id, f"✅ {user.first_name} has joined!")
+
+    # Track who invited this user
+    invite_link = request.invite_link
+    inviter_display = link_to_inviter.get(invite_link, "Unknown")
+
+    if inviter_display not in invite_stats:
+        invite_stats[inviter_display] = []
+
+    invite_stats[inviter_display].append({
+        'user_id': user.id,
+        'join_date': datetime.datetime.now()
+    })
+
+    logging.info(f"User {user.id} joined via invite from {inviter_display}.")
+
+
+async def join_event_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles new users joining and existing users leaving."""
+    chat_member = update.chat_member
+    user = chat_member.new_chat_member.user
+
+    if chat_member.new_chat_member.status == ChatMember.MEMBER:
+        await context.bot.send_message(chat_member.chat.id, f"👋 Welcome {user.first_name}!")
+
+    elif chat_member.new_chat_member.status in [ChatMember.LEFT, ChatMember.KICKED]:
+        await context.bot.send_message(chat_member.chat.id, f"❌ {user.first_name} has left.")
 # --- Helper function to generate leaderboard text ---
 async def generate_leaderboard_message(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
     now = datetime.datetime.now()
@@ -155,6 +205,7 @@ def main():
     global BOT_TOKEN, GROUP_CHAT_ID
     BOT_TOKEN = "7672094667:AAE0KZYq0QY3z5hCa_iaIr94vaRbJSAyjnU"        # Replace with your actual bot token.
     GROUP_CHAT_ID = "-1002455294618"   # e.g., -1001234567890
+
 
     logging.basicConfig(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
