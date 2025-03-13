@@ -19,4 +19,4 @@ primary_region = 'lax'
 [[vm]]
   memory = '16gb'
   cpu_kind = 'shared'
-  cpus = 8
+  cpus = 2
